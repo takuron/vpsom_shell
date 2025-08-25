@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  # --- FreshRSS 应用服务 ---
+  freshrss:
+    image: freshrss/freshrss:latest
+    container_name: freshrss
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ}
+      - CRON_MIN=*/30
+      # PostgreSQL 数据库连接配置
+      - DB_TYPE=pgsql
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${POSTGRES_DB}
+      - DB_USER=${POSTGRES_USER}
+      - DB_PASS=${POSTGRES_PASSWORD}
+    volumes:
+      - freshrss_data:/var/www/FreshRSS/data
+      - freshrss_extensions:/var/www/FreshRSS/extensions
+    networks:
+      - default # 仅连接到内部网络
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost/api/fever.php || exit 1"]
+      interval: 1m30s
+      timeout: 10s
+      retries: 3
+      start_period: 1m
+    ports:
+      # 仅将80端口映射到主机的 localhost (127.0.0.1)，供 Caddy 访问
+      - "${FRESHRSS_HOST_PORT:-8090}:80"
+    labels:
+      # 为 Watchtower 指定此服务需要监控和更新
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # --- PostgreSQL 数据库服务 ---
+  db:
+    image: postgres:17-alpine # 建议使用明确的版本以保证稳定性，例如 16-alpine
+    container_name: freshrss_db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - TZ=${TZ}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - default # 仅在内部网络中，不向外暴露
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    labels:
+      # 为 Watchtower 指定此服务需要监控和更新
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # --- 自动更新服务 ---
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      # 需要访问 Docker socket 才能管理其他容器
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --cleanup --schedule "0 4 * * *" --label-enable
+    labels:
+      # Watchtower 不需要自我更新
+      - "com.centurylinklabs.watchtower.enable=false"
+
+volumes:
+  freshrss_data:
+  freshrss_extensions:
+  postgres_data:
+
+networks:
+  default:
+    driver: bridge
