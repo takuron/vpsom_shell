@@ -1,0 +1,76 @@
+# docker-compose.yml
+# 保存此文件到您的项目目录
+
+version: '3.8'
+
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: vaultwarden
+    restart: unless-stopped
+    volumes:
+      - vw-data:/data
+    ports:
+      # --- 重要: 只绑定到 localhost ---
+      # 这样外部无法直接访问 13000 端口，只能通过本机运行的 Caddy 代理
+      - "127.0.0.1:13000:80"
+    environment:
+      # --- 必须修改 ---
+      # 您的最终公共访问 URL (通过 Cloudflare 访问)
+      - DOMAIN=https://vaultwarden.example.com  # <--- 修改为您的域名
+      # 启用 WebSocket (对于 Caddy 代理和良好性能至关重要)
+      - WEBSOCKET_ENABLED=true
+      # 设置管理员后台 (/admin) 令牌 (使用 openssl rand -base64 48 生成)
+      - ADMIN_TOKEN=Your_Token # <--- 修改为您的强令牌
+      # 设置时区 (例如: Asia/Tokyo, Europe/Berlin, America/New_York)
+      - TZ=Asia/Singapore                      # <--- 修改为您所在的时区
+
+      # --- 可选配置 ---
+      # 允许/禁止新用户注册 (建议设置账户后改为 false)
+      - SIGNUPS_ALLOWED=false
+      # 其他 SMTP 等配置...
+
+    labels:
+      # 允许 Watchtower 更新此容器
+      - "com.centurylinklabs.watchtower.enable=true"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 1m30s
+      timeout: 30s
+      retries: 3
+      start_period: 30s
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # 设置 Watchtower 容器的时区
+      - TZ=Asia/Singapore                  # <--- 修改为您所在的时区
+    # 每 24 小时检查一次，清理旧镜像，只更新带标签的容器
+    command: --cleanup --interval 86400 --label-enable
+
+  # --- 新增的备份服务 ---
+  backup:
+    # 使用我们自定义的 Dockerfile 来构建镜像
+    build: ./backup
+    container_name: vaultwarden-backup
+    restart: unless-stopped
+    volumes:
+      # 以只读方式挂载 Vaultwarden 的数据卷，确保安全
+      - vw-data:/data:ro
+      # 挂载 rclone 的配置文件
+      - ./rclone.conf:/root/.config/rclone/rclone.conf:ro
+    environment:
+      # 设置备份间隔时间 (单位: 秒)。86400 秒 = 24 小时
+      - BACKUP_INTERVAL=86400
+      - TZ=Asia/Singapore
+
+
+# 定义 Docker 卷，用于持久化存储 Vaultwarden 数据
+volumes:
+  vw-data:
+    # 可以指定 driver 或 driver_opts，但通常默认即可
+    # driver: local
