@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  memu-server:
+    build:
+      context: .
+      args:
+        INSTALL_MODE: minimal
+        INCLUDE_GPU: false
+        INCLUDE_LOCAL_MODELS: false
+    # 將端口映射到主機的 localhost，這樣只有本機的 Caddy 可以訪問，更安全
+    ports:
+      - "127.0.0.1:12800:8000"
+    env_file: .env
+    volumes:
+      - memu-memory:/app/memory
+      - memu-logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      # 檢查服務是否正常運行，這裡假設服務根目錄會回傳 HTTP 200 OK
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 1m30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      # 添加標籤讓 Watchtower 知道要自動更新這個容器
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower
+    volumes:
+      # 掛載 Docker socket 以便 Watchtower 可以管理其他容器
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --cleanup --interval 86400 # 每 24 小時檢查一次更新，並清理舊的映像檔
+    restart: unless-stopped
+
+volumes:
+  memu-memory:
+  memu-logs:
