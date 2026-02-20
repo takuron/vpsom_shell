@@ -21,6 +21,9 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+# 将 SSH 公钥导入到哪个用户：优先 sudo 的原始用户，否则 root
+TARGET_SSH_USER="${SUDO_USER:-root}"
+
 # 全局变量，用于存储新的SSH端口
 NEW_SSH_PORT=""
 
@@ -66,36 +69,157 @@ EOF
   fi
 }
 
-# 3. 修改 SSH 端口 (修正版)
+# 3. 修改 SSH
 change_ssh_port() {
-  echo -e "\n${GREEN}=== 3. 修改 SSH 默认端口 ===${NC}"
+  echo -e "\n${GREEN}=== 3. 修改 SSH 默认端口 / 导入公钥 / 关闭密码登录 ===${NC}"
+
+  # --- 3.1 随机端口 ---
   read -p "您想随机修改 SSH 默认端口吗？ (y/n): " choice
   if [[ "$choice" =~ ^[Yy]$ ]]; then
     local ssh_config_file="/etc/ssh/sshd_config"
     NEW_SSH_PORT=$(shuf -i 10000-65535 -n 1)
     echo "正在将 SSH 端口修改为: $NEW_SSH_PORT"
+
     cp "$ssh_config_file" "$ssh_config_file.bak.$(date +%F-%T)"
     echo "已备份配置文件到 $ssh_config_file.bak.*"
-    sed -i -E 's/^[#\s]*Port\s+[0-9]+/#&/' "$ssh_config_file"
-    echo "" >> "$ssh_config_file"
-    echo "# 由初始化脚本设置于 $(date)" >> "$ssh_config_file"
-    echo "Port $NEW_SSH_PORT" >> "$ssh_config_file"
-    if grep -q -E "^Port\s+$NEW_SSH_PORT" "$ssh_config_file"; then
+
+    # 注释掉已有 Port 行，并追加新的 Port
+    sed -i -E 's/^[#[:space:]]*Port[[:space:]]+[0-9]+/#&/' "$ssh_config_file"
+    {
+      echo ""
+      echo "# 由初始化脚本设置于 $(date)"
+      echo "Port $NEW_SSH_PORT"
+    } >> "$ssh_config_file"
+
+    if grep -q -E "^Port[[:space:]]+$NEW_SSH_PORT" "$ssh_config_file"; then
       echo -e "${GREEN}SSH 端口已成功设置为 ${YELLOW}$NEW_SSH_PORT${GREEN}。${NC}"
-      echo -e "${YELLOW}注意：新的 SSH 端口将在 SSH 服务重启后生效。${NC}"
+      echo -e "${YELLOW}注意：新的 SSH 端口将在 SSH 服务重启/重载后生效。${NC}"
     else
       echo -e "${RED}修改 SSH 端口失败！请手动检查 $ssh_config_file 文件。${NC}"
     fi
   else
     echo "跳过修改 SSH 端口。"
     local current_port
-    current_port=$(grep -E "^\s*Port\s+" /etc/ssh/sshd_config | awk '{print $2}' | head -n 1)
+    current_port=$(grep -E "^[[:space:]]*Port[[:space:]]+" /etc/ssh/sshd_config | awk '{print $2}' | head -n 1)
     if [[ -z "$current_port" ]]; then
-        NEW_SSH_PORT=22
+      NEW_SSH_PORT=22
     else
-        NEW_SSH_PORT="$current_port"
+      NEW_SSH_PORT="$current_port"
     fi
     echo "将为当前 SSH 端口 ${YELLOW}$NEW_SSH_PORT${NC} 配置防火墙。"
+  fi
+
+  # --- 3.2 可选：从 URL 导入 SSH 公钥 ---
+  echo -e "\n${GREEN}--- 3.2 导入 SSH 公钥 ---${NC}"
+  echo -e "默认导入用户: ${YELLOW}${TARGET_SSH_USER}${NC}"
+  read -p "您想从 URL 导入 SSH 公钥到该用户吗？ (y/n): " import_choice
+  if [[ "$import_choice" =~ ^[Yy]$ ]]; then
+    read -p "请输入公钥 URL（https://... 或 http://...）: " key_url
+
+    if [[ -z "$key_url" ]]; then
+      echo -e "${RED}URL 为空，跳过导入公钥。${NC}"
+    elif [[ ! "$key_url" =~ ^https?:// ]]; then
+      echo -e "${RED}URL 格式不正确（需以 http:// 或 https:// 开头），跳过。${NC}"
+    else
+      # 确定用户 home 目录
+      local user_home
+      user_home=$(getent passwd "$TARGET_SSH_USER" | cut -d: -f6)
+      if [[ -z "$user_home" || ! -d "$user_home" ]]; then
+        echo -e "${RED}无法确定用户 ${TARGET_SSH_USER} 的 home 目录，跳过导入。${NC}"
+      else
+        local ssh_dir="${user_home}/.ssh"
+        local auth_keys="${ssh_dir}/authorized_keys"
+
+        mkdir -p "$ssh_dir"
+        chmod 700 "$ssh_dir"
+        touch "$auth_keys"
+        chmod 600 "$auth_keys"
+        chown -R "${TARGET_SSH_USER}:${TARGET_SSH_USER}" "$ssh_dir"
+
+        echo "正在从 URL 拉取公钥..."
+        # 拉取内容并过滤出合法的 OpenSSH 公钥行（允许多行）
+        local fetched_keys
+        fetched_keys=$(curl -fsSL "$key_url" 2>/dev/null | \
+          sed 's/\r$//' | \
+          grep -E '^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)[[:space:]]+[A-Za-z0-9+/=]+' || true)
+
+        if [[ -z "$fetched_keys" ]]; then
+          echo -e "${RED}未从 URL 获取到有效的 SSH 公钥（或 URL 无法访问）。${NC}"
+        else
+          # 去重追加：如果 key 已存在则不重复写入
+          local added=0
+          while IFS= read -r line; do
+            if grep -Fxq "$line" "$auth_keys"; then
+              :
+            else
+              echo "$line" >> "$auth_keys"
+              added=$((added+1))
+            fi
+          done <<< "$fetched_keys"
+
+          chown "${TARGET_SSH_USER}:${TARGET_SSH_USER}" "$auth_keys"
+          echo -e "${GREEN}公钥导入完成：新增 ${YELLOW}${added}${GREEN} 条。写入：${auth_keys}${NC}"
+        fi
+      fi
+    fi
+  else
+    echo "跳过导入 SSH 公钥。"
+  fi
+
+  # --- 3.3 可选：关闭 SSH 密码登录（仅密钥） ---
+  echo -e "\n${GREEN}--- 3.3 关闭 SSH 密码登录（推荐）---${NC}"
+  read -p "您想关闭 SSH 密码登录，仅允许密钥登录吗？ (y/n): " disable_pw_choice
+  if [[ "$disable_pw_choice" =~ ^[Yy]$ ]]; then
+    # 如果目标用户没有公钥，强烈警告，避免锁死
+    local user_home auth_keys
+    user_home=$(getent passwd "$TARGET_SSH_USER" | cut -d: -f6)
+    auth_keys="${user_home}/.ssh/authorized_keys"
+
+    if [[ -z "$user_home" || ! -f "$auth_keys" || ! -s "$auth_keys" ]]; then
+      echo -e "${RED}警告：用户 ${TARGET_SSH_USER} 的 authorized_keys 不存在或为空！${NC}"
+      echo -e "${RED}如果现在关闭密码登录，您可能会无法再通过 SSH 登录服务器！${NC}"
+      read -p "仍然继续关闭密码登录吗？（强烈不建议）(y/n): " force_disable
+      if [[ ! "$force_disable" =~ ^[Yy]$ ]]; then
+        echo -e "${YELLOW}已取消关闭密码登录。${NC}"
+        return 0
+      fi
+    fi
+
+    local ssh_config_file="/etc/ssh/sshd_config"
+    cp "$ssh_config_file" "$ssh_config_file.bak.$(date +%F-%T)"
+    echo "已备份配置文件到 $ssh_config_file.bak.*"
+
+    # 注释掉相关旧配置（如果存在）
+    sed -i -E 's/^[#[:space:]]*(PasswordAuthentication|KbdInteractiveAuthentication|ChallengeResponseAuthentication|PubkeyAuthentication)[[:space:]]+.*/#&/' "$ssh_config_file"
+
+    # 追加强制配置
+    {
+      echo ""
+      echo "# 由初始化脚本设置于 $(date) - 禁用密码登录，启用公钥登录"
+      echo "PubkeyAuthentication yes"
+      echo "PasswordAuthentication no"
+      echo "KbdInteractiveAuthentication no"
+      echo "ChallengeResponseAuthentication no"
+    } >> "$ssh_config_file"
+
+    # 校验 sshd 配置是否正确
+    if /usr/sbin/sshd -t -f "$ssh_config_file" 2>/dev/null; then
+      echo -e "${GREEN}sshd 配置校验通过。${NC}"
+      echo -e "${YELLOW}提示：为避免当前 SSH 会话断开，本脚本不强制重启 SSH。${NC}"
+      echo -e "${YELLOW}你可以稍后手动执行：sudo systemctl reload ssh  或  sudo systemctl restart ssh${NC}"
+      echo -e "${YELLOW}并务必在新终端测试：ssh -p ${NEW_SSH_PORT} ${TARGET_SSH_USER}@服务器IP${NC}"
+    else
+      echo -e "${RED}sshd 配置校验失败！将回滚配置。${NC}"
+      # 回滚到最近一次备份（当前函数里刚备份的那个）
+      local last_bak
+      last_bak=$(ls -1t /etc/ssh/sshd_config.bak.* 2>/dev/null | head -n 1 || true)
+      if [[ -n "$last_bak" ]]; then
+        cp "$last_bak" "$ssh_config_file"
+        echo -e "${YELLOW}已回滚到备份：$last_bak${NC}"
+      fi
+    fi
+  else
+    echo "跳过关闭 SSH 密码登录。"
   fi
 }
 
@@ -110,8 +234,13 @@ setup_ufw() {
     ufw --force reset
     ufw default deny incoming
     ufw default allow outgoing
+    # TCP: HTTP/HTTPS
     ufw allow 80/tcp comment 'HTTP'
     ufw allow 443/tcp comment 'HTTPS'
+    # UDP: QUIC/HTTP3
+    ufw allow 80/udp comment 'HTTP (QUIC)'
+    ufw allow 443/udp comment 'HTTPS (QUIC/HTTP3)'
+
     if [[ -n "$NEW_SSH_PORT" ]]; then
       ufw allow "$NEW_SSH_PORT"/tcp comment 'SSH'
       echo -e "已为 SSH 端口 ${YELLOW}$NEW_SSH_PORT${NC} 添加了 UFW 规则。"
