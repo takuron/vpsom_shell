@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   memu-server:
@@ -28,12 +28,16 @@ services:
       - "com.centurylinklabs.watchtower.enable=true"
 
   watchtower:
-    image: containrrr/watchtower
+    # 替换为活跃维护的社区分支
+    image: nickfedor/watchtower:latest
     volumes:
       # 掛載 Docker socket 以便 Watchtower 可以管理其他容器
       - /var/run/docker.sock:/var/run/docker.sock
     command: --cleanup --interval 86400 # 每 24 小時檢查一次更新，並清理舊的映像檔
     restart: unless-stopped
+    labels:
+      # 让 Watchtower 也自动更新它自己
+      - "com.centurylinklabs.watchtower.enable=true"
 
 volumes:
   memu-memory:

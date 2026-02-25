@@ -18,14 +18,14 @@ services:
       # 这允许您启动后在 Web 界面中自由配置任何 OpenAI 格式的 API
       # - 'OLLAMA_API_BASE_URL=""'
       # - 'OLLAMA_BASE_URL=""' # 较新版本可能使用这个，两个都加上更保险
-      - 'TZ=Asia/Shanghai'    # 设置时区
+      - "TZ=Asia/Shanghai" # 设置时区
     restart: unless-stopped
     healthcheck:
       # 健康检查：尝试访问容器内的 /health 接口
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s    # 每30秒检查一次
-      timeout: 10s     # 10秒超时
-      retries: 3       # 失败重试3次
+      interval: 30s # 每30秒检查一次
+      timeout: 10s # 10秒超时
+      retries: 3 # 失败重试3次
       start_period: 60s # 启动后等待60秒再开始第一次检查
     labels:
       # --- 自动更新标签 ---
@@ -35,13 +35,14 @@ services:
   # --- 自动更新服务 ---
   # https://containrrr.dev/watchtower/
   watchtower:
-    image: containrrr/watchtower
+    # 替换为活跃维护的社区分支
+    image: nickfedor/watchtower:latest
     container_name: watchtower_openwebui
     volumes:
       # 挂载 Docker socket 以便 Watchtower 可以管理其他容器
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      - 'TZ=Asia/Shanghai'
+      - "TZ=Asia/Shanghai"
     command: >
       --schedule "0 0 4 * * *"  # 每天凌晨4点检查更新
       --cleanup                 # 更新后自动删除旧镜像

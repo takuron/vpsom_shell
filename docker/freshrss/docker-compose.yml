@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   # --- FreshRSS 应用服务 ---
@@ -25,7 +25,11 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost/api/fever.php || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget --no-verbose --tries=1 --spider http://localhost/api/fever.php || exit 1",
+        ]
       interval: 1m30s
       timeout: 10s
       retries: 3
@@ -63,7 +67,8 @@ services:
 
   # --- 自动更新服务 ---
   watchtower:
-    image: containrrr/watchtower
+    # 替换为活跃维护的社区分支
+    image: nickfedor/watchtower:latest
     container_name: watchtower
     restart: unless-stopped
     volumes:
@@ -71,8 +76,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     command: --cleanup --schedule "0 4 * * *" --label-enable
     labels:
-      # Watchtower 不需要自我更新
-      - "com.centurylinklabs.watchtower.enable=false"
+      # 让 Watchtower 也自动更新它自己
+      - "com.centurylinklabs.watchtower.enable=true"
 
 volumes:
   freshrss_data:
